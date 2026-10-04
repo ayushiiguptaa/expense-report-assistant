@@ -8,9 +8,15 @@ from google import genai
 # ---------- CONFIG ----------
 st.set_page_config(page_title="Expense Report Assistant", page_icon="🧾", layout="wide")
 
-MEAL_LIMIT = 1500          # ₹ per entry before approval needed
-TRAVEL_RECEIPT_THRESHOLD = 500  # ₹ above which a receipt is required
-CATEGORIES = ["Travel", "Meals", "Software", "Office Supplies", "Client Entertainment", "Other"]
+CATEGORIES = [
+    "Travel / Local Transport",
+    "Meals",
+    "Accommodation",
+    "Air Travel",
+    "Office Supplies",
+    "Client Entertainment",
+    "Other",
+]
 
 # ---------- GEMINI CLIENT ----------
 @st.cache_resource
@@ -49,19 +55,80 @@ User-selected category: {category_hint}
         return {"suggested_category": category_hint, "note": f"AI error, showing fallback. ({e})"}
 
 
-def check_policy(category, amount, has_receipt):
-    """Simple rule-based policy check. Deterministic, not AI-driven."""
+def check_policy(category, amount, has_receipt, air_class, description):
+    """
+    Deterministic, rule-based policy check (no AI involved).
+    Returns (status, flags) where status is one of:
+    "Compliant", "Requires Review", "Non-Compliant"
+    """
     flags = []
-    if category == "Meals" and amount > MEAL_LIMIT:
-        flags.append(f"Exceeds meal limit of ₹{MEAL_LIMIT} — needs manager approval.")
-    if category == "Travel" and amount > TRAVEL_RECEIPT_THRESHOLD and not has_receipt:
-        flags.append(f"Travel expense over ₹{TRAVEL_RECEIPT_THRESHOLD} requires a receipt.")
-    if category == "Client Entertainment" and "alcohol" in st.session_state.get("_last_desc", "").lower():
-        flags.append("Alcohol is not reimbursable under company policy.")
-    if amount <= 0:
-        flags.append("Amount must be greater than zero.")
-    return flags
+    status = "Compliant"
 
+    def flag(msg, level="Requires Review"):
+        nonlocal status
+        flags.append(msg)
+        # Non-Compliant outranks Requires Review
+        if level == "Non-Compliant" or status != "Non-Compliant":
+            if level == "Non-Compliant":
+                status = "Non-Compliant"
+            elif status == "Compliant":
+                status = "Requires Review"
+
+    if amount <= 0:
+        flag("Amount must be greater than zero.", "Non-Compliant")
+        return status, flags
+
+    if category == "Travel / Local Transport":
+        if amount > 500 and not has_receipt:
+            flag("Receipt required for travel expenses above ₹500.")
+        if amount > 2500:
+            flag("Exceeds ₹2,500 — requires manager approval.")
+
+    elif category == "Meals":
+        if amount > 1500:
+            flag("Exceeds meal limit of ₹1,500 — requires manager approval.")
+        if amount > 500 and not has_receipt:
+            flag("Receipt required for meal expenses above ₹500.")
+        if "alcohol" in description.lower():
+            flag("Alcohol is not reimbursable under company policy.", "Non-Compliant")
+
+    elif category == "Accommodation":
+        if not has_receipt:
+            flag("Receipt required for all accommodation expenses.")
+        if amount > 7000:
+            flag("Exceeds ₹7,000/night limit — requires manager approval.")
+
+    elif category == "Air Travel":
+        if not has_receipt:
+            flag("Receipt/ticket required for air travel.")
+        if air_class != "Economy":
+            flag("Only Economy class is normally reimbursable.")
+
+    elif category == "Office Supplies":
+        if amount > 500 and not has_receipt:
+            flag("Receipt required for office supplies above ₹500.")
+        if amount > 5000:
+            flag("Exceeds ₹5,000 — requires manager approval.")
+
+    elif category == "Client Entertainment":
+        if not has_receipt:
+            flag("Receipt required for client entertainment.")
+        if amount > 3000:
+            flag("Exceeds ₹3,000 limit — requires manager approval.")
+        if not description.strip():
+            flag("Business purpose must be provided in the description.")
+
+    elif category == "Other":
+        flag("No predefined policy rule for 'Other' — always needs manual review.")
+
+    return status, flags
+
+
+STATUS_STYLE = {
+    "Compliant": ("✅", "success"),
+    "Requires Review": ("⚠️", "warning"),
+    "Non-Compliant": ("❌", "error"),
+}
 
 # ---------- SESSION STATE ----------
 if "entries" not in st.session_state:
@@ -69,7 +136,7 @@ if "entries" not in st.session_state:
 
 # ---------- UI ----------
 st.title("🧾 Expense Report Assistant")
-st.caption("Submit expenses, get AI-assisted categorization, and see policy flags instantly.")
+st.caption("Submit expenses, get AI-assisted categorization, and an instant compliance decision.")
 
 with st.form("entry_form", clear_on_submit=True):
     col1, col2 = st.columns(2)
@@ -77,6 +144,9 @@ with st.form("entry_form", clear_on_submit=True):
         entry_date = st.date_input("Date", value=date.today())
         category = st.selectbox("Category", CATEGORIES)
         amount = st.number_input("Amount (₹)", min_value=0.0, step=50.0, format="%.2f")
+        air_class = None
+        if category == "Air Travel":
+            air_class = st.selectbox("Travel class", ["Economy", "Premium Economy", "Business", "First"])
     with col2:
         description = st.text_input("Description", placeholder="e.g. Uber to airport for client meeting")
         has_receipt = st.checkbox("Receipt attached?")
@@ -88,9 +158,8 @@ with st.form("entry_form", clear_on_submit=True):
         elif amount <= 0:
             st.error("Amount must be greater than zero.")
         else:
-            st.session_state["_last_desc"] = description
             ai_result = ai_categorize_and_explain(description, amount, category)
-            flags = check_policy(category, amount, has_receipt)
+            status, flags = check_policy(category, amount, has_receipt, air_class, description)
 
             entry = {
                 "Date": str(entry_date),
@@ -100,10 +169,13 @@ with st.form("entry_form", clear_on_submit=True):
                 "Amount": amount,
                 "Receipt": "Yes" if has_receipt else "No",
                 "AI Note": ai_result.get("note", ""),
-                "Policy Flags": "; ".join(flags) if flags else "None",
+                "Status": status,
+                "Reasons": "; ".join(flags) if flags else "No policy violations detected.",
             }
             st.session_state.entries.append(entry)
-            st.success("Expense added below.")
+
+            icon, kind = STATUS_STYLE[status]
+            getattr(st, kind)(f"{icon} **{status.upper()}** — {entry['Reasons']}")
 
 # ---------- TABLE + SUMMARY ----------
 st.divider()
@@ -111,19 +183,24 @@ st.subheader("Submitted Expenses")
 
 if st.session_state.entries:
     df = pd.DataFrame(st.session_state.entries)
-    st.dataframe(df, use_container_width=True)
+
+    def style_status(val):
+        colors = {"Compliant": "#1a3a1a", "Requires Review": "#4a3a10", "Non-Compliant": "#4a1a1a"}
+        return f"background-color: {colors.get(val, '')}"
+
+    st.dataframe(df.style.map(style_status, subset=["Status"]), use_container_width=True)
 
     total = df["Amount"].sum()
-    flagged = df[df["Policy Flags"] != "None"]
+    needs_review = df[df["Status"] != "Compliant"]
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Submitted", f"₹{total:,.2f}")
     c2.metric("Entries", len(df))
-    c3.metric("Flagged for Review", len(flagged))
+    c3.metric("Needs Review / Non-Compliant", len(needs_review))
 
-    if not flagged.empty:
-        st.warning("Some entries need manager approval or are missing documentation:")
-        st.dataframe(flagged[["Description", "Amount", "Policy Flags"]], use_container_width=True)
+    if not needs_review.empty:
+        st.warning("These entries are not auto-approved and need a human to look at them:")
+        st.dataframe(needs_review[["Description", "Amount", "Status", "Reasons"]], use_container_width=True)
 
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button("⬇️ Download as CSV", csv, "expense_report.csv", "text/csv")
@@ -135,7 +212,21 @@ else:
     st.info("No expenses submitted yet. Add one above.")
 
 st.divider()
+with st.expander("📋 Policy reference"):
+    st.markdown("""
+| Category | Rule |
+|---|---|
+| Travel / Local Transport | ≤₹500 no receipt needed. >₹500 needs a receipt. >₹2,500 needs manager approval. |
+| Meals | Max ₹1,500/expense. Receipt required above ₹500. No alcohol. |
+| Accommodation | Max ₹7,000/night. Receipt always required. |
+| Air Travel | Economy only. Receipt/ticket always required. |
+| Office Supplies | ≤₹5,000 normally fine. Receipt required above ₹500. |
+| Client Entertainment | Max ₹3,000. Receipt + business purpose required. |
+| Other | Always requires manual review. |
+""")
+
 st.caption(
-    "⚠️ This tool flags policy issues and suggests categories — it does not grant final approval. "
-    "A human approver should review all flagged items. Your inputs are sent to Google's Gemini API for categorization."
+    "⚠️ This tool flags policy issues and suggests a status — it does not grant final approval. "
+    "A human approver should review every 'Requires Review' or 'Non-Compliant' item. "
+    "Your inputs are sent to Google's Gemini API for categorization."
 )
