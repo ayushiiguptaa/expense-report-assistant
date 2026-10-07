@@ -44,7 +44,11 @@ Amount: ₹{amount}
 User-selected category: {category_hint}
 """
     try:
-        response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config={"http_options": {"timeout": 15000}},  # 15 seconds, in milliseconds
+        )
         text = response.text.strip()
         text = text.replace("```json", "").replace("```", "").strip()
         data = json.loads(text)
@@ -144,11 +148,17 @@ with st.form("entry_form", clear_on_submit=True):
         entry_date = st.date_input("Date", value=date.today())
         category = st.selectbox("Category", CATEGORIES)
         amount = st.number_input("Amount (₹)", min_value=0.0, step=50.0, format="%.2f")
-        air_class = None
-        if category == "Air Travel":
-            air_class = st.selectbox("Travel class", ["Economy", "Premium Economy", "Business", "First"])
+        air_class = st.selectbox(
+            "Travel class (only applies to Air Travel)",
+            ["N/A", "Economy", "Premium Economy", "Business", "First"],
+            help="Only checked against policy when Category is 'Air Travel'.",
+        )
     with col2:
-        description = st.text_input("Description", placeholder="e.g. Uber to airport for client meeting")
+        description = st.text_input(
+            "Description / Business purpose",
+            placeholder="e.g. Uber to airport for client meeting",
+            help="For Client Entertainment, this also serves as the required business purpose.",
+        )
         has_receipt = st.checkbox("Receipt attached?")
     submitted = st.form_submit_button("Submit Expense")
 
@@ -221,7 +231,7 @@ with st.expander("📋 Policy reference"):
 | Accommodation | Max ₹7,000/night. Receipt always required. |
 | Air Travel | Economy only. Receipt/ticket always required. |
 | Office Supplies | ≤₹5,000 normally fine. Receipt required above ₹500. |
-| Client Entertainment | Max ₹3,000. Receipt + business purpose required. |
+| Client Entertainment | Max ₹3,000. Receipt required, and the Description field must state a business purpose. |
 | Other | Always requires manual review. |
 """)
 
