@@ -47,7 +47,7 @@ User-selected category: {category_hint}
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=prompt,
-            config={"http_options": {"timeout": 15000}},  # 15 seconds, in milliseconds
+            config={"http_options": {"timeout": 60000}},  # 60 seconds, in milliseconds
         )
         text = response.text.strip()
         text = text.replace("```json", "").replace("```", "").strip()
