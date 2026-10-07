@@ -27,36 +27,60 @@ def get_client():
     return genai.Client(api_key=api_key)
 
 client = get_client()
-MODEL_NAME = "gemini-flash-latest"  # check aistudio.google.com for current model names
+MODEL_NAME = "gemini-3.5-flash-lite"  # check aistudio.google.com for current model names
 
 
 def ai_categorize_and_explain(description, amount, category_hint):
-    """Ask Gemini to suggest a category and, if relevant, explain a policy flag."""
-    if client is None:
-        return {"suggested_category": category_hint, "note": "AI unavailable (no API key set)."}
+    """Ask Gemini to independently suggest an expense category."""
 
-    prompt = f"""You are an expense-categorization assistant for a company finance team.
-Given this expense, respond ONLY with JSON, no markdown, no backticks:
-{{"suggested_category": one of {CATEGORIES}, "note": "one short plain-English sentence explaining the categorization or any concern"}}
+    if client is None:
+        return {
+            "suggested_category": category_hint,
+            "note": "AI unavailable. User-selected category used as fallback.",
+            "ai_success": False
+        }
+
+    prompt = f"""
+You are an expense-categorization assistant for a company finance team.
+
+Independently categorize the expense based only on the expense description
+and amount.
+
+Allowed categories:
+{CATEGORIES}
+
+Respond ONLY with valid JSON in this exact format:
+{{
+  "suggested_category": "one category from the allowed list",
+  "note": "one short plain-English sentence explaining why this category fits"
+}}
 
 Expense description: "{description}"
 Amount: ₹{amount}
-User-selected category: {category_hint}
 """
+
     try:
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=prompt,
-            config={"http_options": {"timeout": 60000}},  # 60 seconds, in milliseconds
         )
+
         text = response.text.strip()
         text = text.replace("```json", "").replace("```", "").strip()
         data = json.loads(text)
+
         if data.get("suggested_category") not in CATEGORIES:
             data["suggested_category"] = category_hint
+
+        data["ai_success"] = True
         return data
-    except Exception as e:
-        return {"suggested_category": category_hint, "note": f"AI error, showing fallback. ({e})"}
+
+    except Exception:
+        return {
+            "suggested_category": category_hint,
+            "note": "AI categorization temporarily unavailable. User-selected category used as fallback.",
+            "ai_success": False
+        }
 
 
 def check_policy(category, amount, has_receipt, air_class, description):
@@ -140,7 +164,7 @@ if "entries" not in st.session_state:
 
 # ---------- UI ----------
 st.title("🧾 Expense Report Assistant")
-st.caption("Submit expenses, get AI-assisted categorization, and an instant compliance decision.")
+st.caption("Submit expenses, get AI-assisted categorization, and an instant compliance status.")
 
 with st.form("entry_form", clear_on_submit=True):
     col1, col2 = st.columns(2)
@@ -171,11 +195,28 @@ with st.form("entry_form", clear_on_submit=True):
             ai_result = ai_categorize_and_explain(description, amount, category)
             status, flags = check_policy(category, amount, has_receipt, air_class, description)
 
+            ai_category = ai_result.get("suggested_category", category)
+            ai_success = ai_result.get("ai_success", False)
+
+            if not ai_success:
+                flags.append(
+                    "AI categorization was unavailable. User-selected category was used as fallback."
+                )
+                if status == "Compliant":
+                    status = "Requires Review"
+
+            elif ai_category != category:
+                flags.append(
+                    f"AI suggests '{ai_category}' instead of '{category}' — category should be reviewed."
+                )
+                if status == "Compliant":
+                    status = "Requires Review"
+
             entry = {
                 "Date": str(entry_date),
                 "Description": description,
                 "Category (you)": category,
-                "Category (AI suggests)": ai_result.get("suggested_category", category),
+                "Category (AI suggests)": ai_category,
                 "Amount": amount,
                 "Receipt": "Yes" if has_receipt else "No",
                 "AI Note": ai_result.get("note", ""),
